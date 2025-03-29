@@ -4,92 +4,174 @@
 import Hyperswarm from 'hyperswarm'
 import crypto from 'hypercore-crypto'
 import b4a from 'b4a'
+import { Noise } from '@holepunch/noise'
+import Corestore from 'corestore'
+import Hypercore from 'hypercore'
 
 const { teardown, updates } = Pear
 
 class WalkieTalkieP2P {
     constructor() {
-        this.rtcConfig = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        };
-        
         this.swarm = null;
-        this.peerConnections = new Map();
+        this.peers = new Map();
+        this.store = new Corestore('./storage'); // Almacenamiento persistente
+        this.audioCore = null;
         this.localStream = null;
-        this.isRecording = false;
-        this.pendingCandidates = new Map(); // Para almacenar candidatos ICE pendientes
+        this.isTransmitting = false;
+        this.audioContext = null;
+        this.audioWorklet = null;
+        this.noise = new Noise(); // Para encriptación de datos
+        this.debugInfo = {
+            audioLevel: 0,
+            peersConnected: 0,
+            lastTransmission: null,
+            lastReceived: null
+        };
     }
 
     async initialize() {
         try {
-            // Solicitar permisos de audio temprano
+            console.log('Iniciando sistema de audio...');
+            
+            // Inicializar el store
+            await this.store.ready();
+            
+            // Crear un hypercore para los datos de audio
+            this.audioCore = this.store.get({ name: 'audio' });
+            await this.audioCore.ready();
+            
+            // Configuración de audio optimizada
             this.localStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
+                    sampleRate: 48000,
+                    channelCount: 1,
                     echoCancellation: true,
                     noiseSuppression: true,
-                    autoGainControl: true,
-                    sampleRate: 48000
+                    autoGainControl: true
                 },
                 video: false
             });
+
+            // Inicializar contexto de audio
+            this.audioContext = new AudioContext({
+                sampleRate: 48000,
+                latencyHint: 'interactive'
+            });
+
+            await this.audioContext.audioWorklet.addModule('src/audio-processor.js');
+            
+            const source = this.audioContext.createMediaStreamSource(this.localStream);
+            this.audioWorklet = new AudioWorkletNode(this.audioContext, 'audio-processor');
+            
+            this.audioWorklet.port.onmessage = (event) => {
+                if (this.isTransmitting) {
+                    this.broadcastAudio(event.data);
+                }
+            };
+            
+            source.connect(this.audioWorklet);
+            this.audioWorklet.connect(this.audioContext.destination);
             
             console.log('Audio inicializado correctamente');
             return true;
-    } catch (error) {
-            console.error('Error al inicializar audio:', error);
-            updateStatus('Error al acceder al micrófono');
+        } catch (error) {
+            console.error('Error al inicializar:', error);
             return false;
         }
     }
 
     async createRoom() {
         try {
-            updateStatus('Creando sala...');
+            const keyPair = crypto.keyPair();
+            const topic = crypto.randomBytes(32);
             
-            // Generar topic para Pear
-            const topicBuffer = crypto.randomBytes(32);
-            const topic = b4a.toString(topicBuffer, 'hex');
+            this.swarm = new Hyperswarm({
+                keyPair,
+                bootstrap: true
+            });
+
+            await this.swarm.join(topic, {
+                client: true,
+                server: true
+            });
             
-            // Inicializar Hyperswarm
-            this.swarm = new Hyperswarm();
-            this.swarm.join(topicBuffer);
-            
-            // Configurar eventos de conexión
             this.setupSwarmEvents();
             
-            updateRoomId(topic);
-            updateStatus('Sala creada. Esperando conexión...');
+            const roomId = b4a.toString(topic, 'hex');
+            updateStatus('Sala creada. Esperando conexiones...');
+            updateRoomId(roomId);
             
-            return topic;
-    } catch (error) {
+            return roomId;
+        } catch (error) {
             console.error('Error al crear sala:', error);
-            updateStatus('Error al crear sala');
             return null;
         }
     }
 
-    async joinRoom(topic) {
+    setupSwarmEvents() {
+        this.swarm.on('connection', async (socket, info) => {
+            try {
+                // Establecer conexión segura
+                const noiseSocket = this.noise.connect(socket, {
+                    publicKey: info.publicKey,
+                    autoStart: true
+                });
+
+                await noiseSocket.ready();
+                
+                const peerId = b4a.toString(info.publicKey, 'hex');
+                console.log('Nuevo peer conectado:', peerId);
+                
+                this.peers.set(peerId, noiseSocket);
+                
+                // Replicar el hypercore con el peer
+                const stream = this.audioCore.replicate(noiseSocket);
+                
+                noiseSocket.on('data', (data) => {
+                    this.handleAudioData(data);
+                });
+                
+                noiseSocket.on('close', () => {
+                    console.log('Peer desconectado:', peerId);
+                    this.peers.delete(peerId);
+                    if (this.peers.size === 0) {
+                        updateStatus('Desconectado');
+                    }
+                });
+
+                updateStatus(`Conectado a: ${peerId.substr(0, 6)}`);
+                updateRecordButton(true);
+    } catch (error) {
+                console.error('Error en la conexión:', error);
+            }
+        });
+    }
+
+    async joinRoom(roomId) {
         try {
-            if (!topic) {
+            if (!roomId) {
                 updateStatus('ID de sala inválido');
                 return false;
             }
 
-            updateStatus('Conectando a la sala...');
+            console.log('Intentando unirse a la sala:', roomId);
             
-            // Convertir topic string a buffer
-            const topicBuffer = b4a.from(topic, 'hex');
+            // Convertir el ID de la sala a buffer
+            const topicBuffer = b4a.from(roomId, 'hex');
             
-            // Inicializar Hyperswarm
+            // Crear nueva instancia de Hyperswarm
             this.swarm = new Hyperswarm();
-            this.swarm.join(topicBuffer);
+
+        // Unirse al swarm con el topic
+            await this.swarm.join(topicBuffer, {
+                client: true,
+                server: false  // Solo cliente cuando nos unimos
+            });
             
             // Configurar eventos de conexión
             this.setupSwarmEvents();
             
+            updateStatus('Conectando a la sala...');
             return true;
     } catch (error) {
             console.error('Error al unirse a la sala:', error);
@@ -98,275 +180,158 @@ class WalkieTalkieP2P {
         }
     }
 
-    setupSwarmEvents() {
-        if (!this.swarm) return;
-
-        this.swarm.on('connection', async (peer) => {
-            try {
-                const peerId = b4a.toString(peer.remotePublicKey, 'hex');
-                console.log('Nuevo peer conectado:', peerId);
-
-                peer.on('data', async (data) => {
-                    try {
-                        const message = JSON.parse(data.toString());
-                        await this.handleSignalingMessage(peerId, message, peer);
-                    } catch (error) {
-                        console.error('Error al procesar mensaje:', error);
-                    }
-                });
-
-                // Iniciar proceso de conexión WebRTC
-                const peerConnection = await this.createPeerConnection(peerId, peer);
-                
-                // Crear oferta si somos el peer con ID más alto
-                if (peerId > b4a.toString(this.swarm.keyPair.publicKey, 'hex')) {
-                    const offer = await peerConnection.createOffer();
-                    const offerSdp = offer.sdp;
-                    const offerMessage = {
-                        type: 'offer',
-                        sdp: offerSdp
-                    };
-                    await peerConnection.setLocalDescription(offer);
-                    peer.write(JSON.stringify(offerMessage));
-                }
-
-                updateStatus(`Conectado a: ${peerId.substr(0, 6)}`);
-                updateRecordButton(true);
-    } catch (error) {
-                console.error('Error en conexión de peer:', error);
-            }
-        });
-    }
-
-    async createPeerConnection(peerId, peerSignaling) {
-        try {
-            console.log('Creando nueva conexión WebRTC');
-            
-            const peerConnection = new RTCPeerConnection({
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ],
-                iceCandidatePoolSize: 10,
-                bundlePolicy: 'max-bundle',
-                rtcpMuxPolicy: 'require'
-            });
-
-            this.peerConnections.set(peerId, peerConnection);
-
-            // Configurar eventos de conexión
-            peerConnection.oniceconnectionstatechange = () => {
-                console.log('Estado de conexión ICE:', peerConnection.iceConnectionState);
-            };
-
-            peerConnection.onconnectionstatechange = () => {
-                console.log('Estado de conexión:', peerConnection.connectionState);
-            };
-
-            peerConnection.onsignalingstatechange = () => {
-                console.log('Estado de señalización:', peerConnection.signalingState);
-            };
-
-            // Agregar tracks de audio
-            if (this.localStream) {
-                this.localStream.getTracks().forEach(track => {
-                    console.log('Agregando track de audio');
-                    peerConnection.addTrack(track, this.localStream);
-                });
-            }
-
-            // Manejar ICE candidates
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    try {
-                        const candidateMessage = JSON.stringify({
-                            type: 'candidate',
-                            candidate: event.candidate
-                        });
-                        peerSignaling.write(candidateMessage);
-                        console.log('ICE candidate enviado');
-        } catch (error) {
-                        console.error('Error al enviar ICE candidate:', error);
-                    }
-                }
-            };
-
-            // Manejar stream remoto
-            peerConnection.ontrack = (event) => {
-                console.log('Stream remoto recibido');
-                const remoteAudio = new Audio();
-                remoteAudio.srcObject = event.streams[0];
-                remoteAudio.play().catch(console.error);
-            };
-
-            return peerConnection;
-    } catch (error) {
-            console.error('Error al crear conexión WebRTC:', error);
-            throw error;
-        }
-    }
-
-    async handleSignalingMessage(peerId, message, peerSignaling) {
-        try {
-            console.log('Mensaje de señalización recibido:', message.type);
-            
-            let peerConnection = this.peerConnections.get(peerId);
-            
-            // Crear conexión si no existe
-            if (!peerConnection) {
-                peerConnection = await this.createPeerConnection(peerId, peerSignaling);
-            }
-
-            switch (message.type) {
-                case 'offer':
-                    try {
-                        console.log('Procesando oferta WebRTC:', message.sdp);
-                        
-                        // Asegurarse de que el mensaje tiene el formato correcto
-                        const sessionDescription = {
-                            type: 'offer',
-                            sdp: message.sdp
-                        };
-
-                        // Limpiar cualquier descripción remota existente
-                        if (peerConnection.remoteDescription) {
-                            console.log('Limpiando descripción remota existente');
-                            await peerConnection.setRemoteDescription({type: 'rollback'});
-                        }
-
-                        // Establecer la nueva descripción remota
-                        await peerConnection.setRemoteDescription(sessionDescription);
-                        console.log('Descripción remota establecida');
-
-                        // Crear y enviar respuesta
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-                        
-                        const answerMessage = JSON.stringify({
-                            type: 'answer',
-                            sdp: answer.sdp
-                        });
-                        
-                        console.log('Enviando respuesta');
-                        peerSignaling.write(answerMessage);
-        
-    } catch (error) {
-                        console.error('Error detallado al procesar oferta:', {
-                            name: error.name,
-                            message: error.message,
-                            stack: error.stack
-                        });
-                    }
-                    break;
-
-                case 'answer':
-                    try {
-                        console.log('Procesando respuesta WebRTC');
-                        const sessionDescription = {
-                            type: 'answer',
-                            sdp: message.sdp
-                        };
-                        await peerConnection.setRemoteDescription(sessionDescription);
-                    } catch (error) {
-                        console.error('Error al procesar respuesta:', error);
-                    }
-                    break;
-
-                case 'candidate':
-                    try {
-                        if (!message.candidate) {
-                            console.log('Candidato ICE vacío, ignorando');
-                            return;
-                        }
-
-                        const candidate = new RTCIceCandidate({
-                            candidate: message.candidate.candidate,
-                            sdpMid: message.candidate.sdpMid,
-                            sdpMLineIndex: message.candidate.sdpMLineIndex
-                        });
-
-                        if (peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
-                            await peerConnection.addIceCandidate(candidate);
-                            console.log('ICE candidate agregado');
-                        } else {
-                            if (!this.pendingCandidates.has(peerId)) {
-                                this.pendingCandidates.set(peerId, []);
-                            }
-                            this.pendingCandidates.get(peerId).push(candidate);
-                            console.log('ICE candidate almacenado para proceso posterior');
-                        }
-                    } catch (error) {
-                        console.error('Error al procesar ICE candidate:', error);
-                    }
-                    break;
-                }
-            } catch (error) {
-            console.error('Error en handleSignalingMessage:', error);
-        }
-    }
-
-    async restartConnection(peerId, peerSignaling) {
-        try {
-            const peerConnection = this.peerConnections.get(peerId);
-            if (peerConnection) {
-                // Crear nueva oferta con indicador de reinicio ICE
-                const offer = await peerConnection.createOffer({ iceRestart: true });
-                await peerConnection.setLocalDescription(offer);
-                peerSignaling.write(JSON.stringify({
-                    type: 'offer',
-                    sdp: offer
-                }));
-                }
-            } catch (error) {
-            console.error('Error al reiniciar conexión:', error);
-        }
-    }
-
     startTransmitting() {
-        if (this.localStream) {
-            this.isRecording = true;
-            this.localStream.getTracks().forEach(track => track.enabled = true);
+        if (this.localStream && this.audioContext) {
+            console.log('Iniciando transmisión...');
+            
+            // Asegurar que el contexto de audio está activo
+            if (this.audioContext.state === 'suspended') {
+                this.audioContext.resume();
+            }
+            
+            this.isTransmitting = true;
+            this.localStream.getTracks().forEach(track => {
+                track.enabled = true;
+            });
+            
             updateStatus('Transmitiendo...');
         }
     }
 
     stopTransmitting() {
         if (this.localStream) {
-            this.isRecording = false;
-            this.localStream.getTracks().forEach(track => track.enabled = false);
+            console.log('Deteniendo transmisión...');
+            this.isTransmitting = false;
+            this.localStream.getTracks().forEach(track => {
+                track.enabled = false;
+            });
             updateStatus('Conectado');
         }
     }
 
     async cleanup() {
-        // Detener todos los tracks
         if (this.localStream) {
             this.localStream.getTracks().forEach(track => track.stop());
         }
-
-        // Cerrar todas las conexiones WebRTC
-        for (const [peerId, connection] of this.peerConnections) {
-            connection.close();
+        
+        if (this.audioContext) {
+            await this.audioContext.close();
         }
-        this.peerConnections.clear();
-
-        // Cerrar conexión Pear
+        
         if (this.swarm) {
             await this.swarm.destroy();
-            this.swarm = null;
         }
-
-        this.isRecording = false;
+        
+        if (this.store) {
+            await this.store.close();
+        }
+        
+        this.peers.clear();
+        this.isTransmitting = false;
         updateStatus('Desconectado');
         updateRoomId('');
         updateRecordButton(false);
     }
+
+    startDebugMonitor() {
+        setInterval(() => {
+            console.log('=== Estado del Sistema ===');
+            console.log('Audio:', {
+                contextState: this.audioContext?.state,
+                transmitiendo: this.isTransmitting,
+                streamActivo: this.localStream?.active
+            });
+            console.log('Conexión:', {
+                swarmActivo: !!this.swarm,
+                peersConectados: this.peers.size,
+                peersIds: Array.from(this.peers.keys()).map(id => id.substr(0, 6))
+            });
+        }, 2000);
+    }
+
+    async broadcastAudio(audioData) {
+        if (!this.isTransmitting || this.peers.size === 0) return;
+
+        try {
+            const dataArray = audioData instanceof Float32Array ? audioData : new Float32Array(audioData);
+            
+            if (dataArray.length === 0) return;
+
+            // Almacenar en el hypercore
+            await this.audioCore.append(Buffer.from(dataArray.buffer));
+            
+            // Transmitir a los peers
+            for (const [peerId, socket] of this.peers) {
+                if (socket.writable) {
+                    socket.write(Buffer.from(dataArray.buffer));
+                    console.log(`Audio enviado a peer ${peerId.substr(0, 6)}`);
+                }
+            }
+        } catch (error) {
+            console.error('Error al transmitir audio:', error);
+        }
+    }
+
+    handleAudioData(data) {
+        try {
+            const message = JSON.parse(data.toString());
+            
+            if (message.type === 'audio' && message.data && message.data.length > 0) {
+                // Convertir los datos recibidos a Float32Array
+                const audioData = new Float32Array(Object.values(message.data));
+                
+                if (audioData.length === 0) {
+                    console.log('Datos de audio recibidos vacíos');
+                    return;
+                }
+
+                console.log('Longitud de datos de audio recibidos:', audioData.length);
+                
+                // Crear buffer de audio con la longitud correcta
+                const audioBuffer = this.audioContext.createBuffer(
+                    1, // mono
+                    audioData.length,
+                    48000 // sample rate
+                );
+                
+                // Copiar los datos al buffer
+                const channelData = audioBuffer.getChannelData(0);
+                channelData.set(audioData);
+                
+                // Crear y configurar source
+                const source = this.audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                
+                // Añadir ganancia para mejor control del volumen
+                const gainNode = this.audioContext.createGain();
+                gainNode.gain.value = 2.0; // Aumentar el volumen
+                
+                // Añadir un compresor para evitar distorsión
+                const compressor = this.audioContext.createDynamicsCompressor();
+                compressor.threshold.value = -24;
+                compressor.knee.value = 30;
+                compressor.ratio.value = 12;
+                compressor.attack.value = 0.003;
+                compressor.release.value = 0.25;
+                
+                // Conectar la cadena de audio
+                source.connect(gainNode);
+                gainNode.connect(compressor);
+                compressor.connect(this.audioContext.destination);
+                
+                source.start();
+                
+                console.log('Audio procesado y reproducido correctamente');
+                this.debugInfo.lastReceived = Date.now();
+            }
+    } catch (error) {
+            console.error('Error al procesar audio recibido:', error);
+        }
+    }
 }
 
-// Instancia global
 let p2pClient = new WalkieTalkieP2P();
 
-// Funciones de utilidad UI (mantener las existentes)
 function updateStatus(message) {
     const statusEl = document.getElementById('status');
     if (statusEl) {
@@ -390,11 +355,9 @@ function updateRecordButton(enabled) {
     }
 }
 
-// Event Listeners
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('Inicializando aplicación...');
     
-    // Inicializar audio
     await p2pClient.initialize();
     
     const createBtn = document.getElementById('createBtn');
@@ -436,10 +399,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.log('Aplicación inicializada');
 });
 
-// Cleanup al cerrar
 teardown(async () => {
     await p2pClient.cleanup();
 });
 
-// Habilitar recarga en desarrollo
 updates(() => Pear.reload()); 
+
+window.debugAudio = () => {
+    const audioTrack = p2pClient.localStream?.getAudioTracks()[0];
+    console.log('=== Debug de Audio ===');
+    console.log('Estado del micrófono:', audioTrack?.enabled);
+    console.log('Label del micrófono:', audioTrack?.label);
+    console.log('Estado del AudioContext:', p2pClient.audioContext?.state);
+    console.log('Peers conectados:', p2pClient.peers.size);
+    console.log('Estado de transmisión:', p2pClient.isTransmitting);
+    console.log('Último nivel de audio:', p2pClient.debugInfo.audioLevel);
+};
+
+setInterval(() => window.debugAudio(), 5000); 
