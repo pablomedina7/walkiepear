@@ -4,9 +4,6 @@
 import Hyperswarm from 'hyperswarm'
 import crypto from 'hypercore-crypto'
 import b4a from 'b4a'
-import { Noise } from '@holepunch/noise'
-import Corestore from 'corestore'
-import Hypercore from 'hypercore'
 
 const { teardown, updates } = Pear
 
@@ -14,13 +11,10 @@ class WalkieTalkieP2P {
     constructor() {
         this.swarm = null;
         this.peers = new Map();
-        this.store = new Corestore('./storage'); // Almacenamiento persistente
-        this.audioCore = null;
         this.localStream = null;
         this.isTransmitting = false;
         this.audioContext = null;
         this.audioWorklet = null;
-        this.noise = new Noise(); // Para encriptación de datos
         this.debugInfo = {
             audioLevel: 0,
             peersConnected: 0,
@@ -32,13 +26,6 @@ class WalkieTalkieP2P {
     async initialize() {
         try {
             console.log('Iniciando sistema de audio...');
-            
-            // Inicializar el store
-            await this.store.ready();
-            
-            // Crear un hypercore para los datos de audio
-            this.audioCore = this.store.get({ name: 'audio' });
-            await this.audioCore.ready();
             
             // Configuración de audio optimizada
             this.localStream = await navigator.mediaDevices.getUserMedia({
@@ -63,6 +50,7 @@ class WalkieTalkieP2P {
             const source = this.audioContext.createMediaStreamSource(this.localStream);
             this.audioWorklet = new AudioWorkletNode(this.audioContext, 'audio-processor');
             
+            // Configurar el procesamiento de audio
             this.audioWorklet.port.onmessage = (event) => {
                 if (this.isTransmitting) {
                     this.broadcastAudio(event.data);
@@ -82,26 +70,20 @@ class WalkieTalkieP2P {
 
     async createRoom() {
         try {
-            const keyPair = crypto.keyPair();
-            const topic = crypto.randomBytes(32);
+            const topicBuffer = crypto.randomBytes(32);
+            const topic = b4a.toString(topicBuffer, 'hex');
             
-            this.swarm = new Hyperswarm({
-                keyPair,
-                bootstrap: true
-            });
-
-            await this.swarm.join(topic, {
+            this.swarm = new Hyperswarm();
+            await this.swarm.join(topicBuffer, {
                 client: true,
                 server: true
             });
             
             this.setupSwarmEvents();
-            
-            const roomId = b4a.toString(topic, 'hex');
             updateStatus('Sala creada. Esperando conexiones...');
-            updateRoomId(roomId);
+            updateRoomId(topic);
             
-            return roomId;
+            return topic;
         } catch (error) {
             console.error('Error al crear sala:', error);
             return null;
@@ -109,41 +91,26 @@ class WalkieTalkieP2P {
     }
 
     setupSwarmEvents() {
-        this.swarm.on('connection', async (socket, info) => {
-            try {
-                // Establecer conexión segura
-                const noiseSocket = this.noise.connect(socket, {
-                    publicKey: info.publicKey,
-                    autoStart: true
-                });
+        this.swarm.on('connection', (peer) => {
+            const peerId = b4a.toString(peer.remotePublicKey, 'hex');
+            console.log('Nuevo peer conectado:', peerId);
+            
+            this.peers.set(peerId, peer);
+            
+            peer.on('data', (data) => {
+                this.handleAudioData(data);
+            });
+            
+            peer.on('close', () => {
+                console.log('Peer desconectado:', peerId);
+                this.peers.delete(peerId);
+                if (this.peers.size === 0) {
+                    updateStatus('Desconectado');
+                }
+            });
 
-                await noiseSocket.ready();
-                
-                const peerId = b4a.toString(info.publicKey, 'hex');
-                console.log('Nuevo peer conectado:', peerId);
-                
-                this.peers.set(peerId, noiseSocket);
-                
-                // Replicar el hypercore con el peer
-                const stream = this.audioCore.replicate(noiseSocket);
-                
-                noiseSocket.on('data', (data) => {
-                    this.handleAudioData(data);
-                });
-                
-                noiseSocket.on('close', () => {
-                    console.log('Peer desconectado:', peerId);
-                    this.peers.delete(peerId);
-                    if (this.peers.size === 0) {
-                        updateStatus('Desconectado');
-                    }
-                });
-
-                updateStatus(`Conectado a: ${peerId.substr(0, 6)}`);
-                updateRecordButton(true);
-    } catch (error) {
-                console.error('Error en la conexión:', error);
-            }
+            updateStatus(`Conectado a: ${peerId.substr(0, 6)}`);
+            updateRecordButton(true);
         });
     }
 
@@ -222,10 +189,6 @@ class WalkieTalkieP2P {
             await this.swarm.destroy();
         }
         
-        if (this.store) {
-            await this.store.close();
-        }
-        
         this.peers.clear();
         this.isTransmitting = false;
         updateStatus('Desconectado');
@@ -249,22 +212,32 @@ class WalkieTalkieP2P {
         }, 2000);
     }
 
-    async broadcastAudio(audioData) {
+    broadcastAudio(audioData) {
         if (!this.isTransmitting || this.peers.size === 0) return;
 
         try {
+            // Asegurarse de que audioData sea un Float32Array
             const dataArray = audioData instanceof Float32Array ? audioData : new Float32Array(audioData);
             
-            if (dataArray.length === 0) return;
+            if (dataArray.length === 0) {
+                console.log('No hay datos de audio para transmitir');
+                return;
+            }
 
-            // Almacenar en el hypercore
-            await this.audioCore.append(Buffer.from(dataArray.buffer));
+            // Convertir Float32Array a Array regular para JSON
+            const audioDataArray = Array.from(dataArray);
             
-            // Transmitir a los peers
-            for (const [peerId, socket] of this.peers) {
-                if (socket.writable) {
-                    socket.write(Buffer.from(dataArray.buffer));
-                    console.log(`Audio enviado a peer ${peerId.substr(0, 6)}`);
+            const message = {
+                type: 'audio',
+                data: audioDataArray,
+                timestamp: Date.now()
+            };
+
+            for (const [peerId, peer] of this.peers) {
+                if (peer.writable) {
+                    peer.write(Buffer.from(JSON.stringify(message)));
+                    this.debugInfo.lastTransmission = Date.now();
+                    console.log(`Audio enviado a peer ${peerId.substr(0, 6)}, longitud: ${audioDataArray.length}`);
                 }
             }
         } catch (error) {
