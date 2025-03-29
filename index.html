@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Walkie-Pear</title>
-    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -17,93 +16,114 @@
             background-color: white;
             padding: 20px;
             border-radius: 10px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-        .input-group {
-            margin-bottom: 20px;
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
         }
-        input {
+        #status {
+            background-color: #f5f5f5;
             padding: 10px;
-            width: 200px;
-            border: 1px solid #ddd;
             border-radius: 5px;
-            margin-right: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            align-items: center;
         }
         button {
             padding: 10px 20px;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            font-weight: bold;
-            transition: background-color 0.3s;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        #createBtn {
+            background-color: #4CAF50;
+            color: white;
+            width: 100%;
         }
         #connectBtn {
-            background-color: #4CAF50;
+            background-color: #2196F3;
             color: white;
         }
         #recordBtn {
-            background-color: #ccc;
+            background-color: #f44336;
             color: white;
             width: 200px;
             height: 200px;
             border-radius: 50%;
-            margin: 20px auto;
-            display: block;
-            font-size: 16px;
+            font-size: 18px;
+            margin-top: 20px;
         }
         #recordBtn:disabled {
-            background-color: #ccc;
+            background-color: #cccccc;
             cursor: not-allowed;
         }
         #recordBtn.recording {
-            background-color: #ff4444;
+            background-color: #d32f2f;
+            animation: pulse 1.5s infinite;
         }
-        #status {
-            text-align: center;
+        .room-id {
             margin: 20px 0;
-            font-weight: bold;
-            color: #666;
-        }
-        #messages {
-            margin-top: 20px;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        .message {
             padding: 10px;
-            margin: 5px 0;
+            background-color: #e8f5e9;
             border-radius: 5px;
+            text-align: center;
+            word-break: break-all;
         }
-        .message.sent {
-            background-color: #e3f2fd;
-            margin-left: 20%;
+        .connection-form {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
         }
-        .message.received {
-            background-color: #f5f5f5;
-            margin-right: 20%;
+        input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Walkie-Pear</h1>
-        
-        <div class="input-group">
-            <input type="text" id="peerId" placeholder="ID del peer">
-            <button id="connectBtn">Conectar</button>
-        </div>
-
         <div id="status">Desconectado</div>
+        
+        <div class="controls">
+            <button id="createBtn" type="button">Crear Sala</button>
+            
+            <div class="room-id">
+                <div>ID de la sala:</div>
+                <div id="roomId"></div>
+            </div>
 
-        <button id="recordBtn" disabled>
-            Mantén presionado para hablar
-        </button>
+            <div class="connection-form">
+                <input type="text" id="peerIdInput" placeholder="Ingresa el ID de la sala">
+                <button id="connectBtn" type="button">Conectar</button>
+            </div>
 
-        <button id="stopBtn" style="display: none;">Detener</button>
-
-        <div id="messages"></div>
+            <button id="recordBtn" type="button" disabled>
+                Mantén presionado para hablar
+            </button>
+        </div>
     </div>
-
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="src/main.js"></script>
 </body>
 </html> 

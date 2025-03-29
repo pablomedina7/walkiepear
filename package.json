@@ -1,21 +1,31 @@
 {
   "name": "walkie-pear",
   "version": "1.0.0",
-  "description": "Walkie-talkie web app using Pear (Holepunch)",
+  "description": "Aplicación P2P de walkie-talkie",
   "type": "module",
   "scripts": {
-    "start": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "peer": "peerjs --port 9000 --key peerjs --path /myapp"
+    "start": "pear run --dev .",
+    "build": "pear build",
+    "preview": "pear preview"
   },
   "dependencies": {
-    "peerjs": "^1.4.7",
-    "hypercore-crypto": "^3.0.0",
-    "buffer": "^6.0.3"
+    "@hyperswarm/dht": "^6.0.1",
+    "hyperswarm": "^4.7.3",
+    "b4a": "^1.6.4",
+    "hypercore-crypto": "^3.3.1"
   },
   "devDependencies": {
-    "vite": "^5.0.0",
-    "peer": "^1.0.0"
+    "pear-interface": "^1.0.0"
+  },
+  "pear": {
+    "uiType": "dom",
+    "entry": "src/main.js",
+    "bare": {
+      "dependencies": {
+        "hyperswarm": "latest",
+        "b4a": "latest",
+        "hypercore-crypto": "latest"
+      }
+    }
   }
-} 
+}
