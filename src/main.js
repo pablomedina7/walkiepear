@@ -18,30 +18,30 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentConnection = null
     let audioContext = null
 
-    // Sonidos de radio
-    const radioSounds = {
-        start: new Audio('/sounds/radio-start.mp3'),
-        end: new Audio('/sounds/radio-end.mp3'),
-        connect: new Audio('/sounds/radio-connect.mp3'),
-        disconnect: new Audio('/sounds/radio-disconnect.mp3')
-    }
-
-    // Configurar volumen de los sonidos
-    Object.values(radioSounds).forEach(sound => {
-        sound.volume = 0.3
-    })
-
+    // Sonido de radio
+    const radioSound = new Audio('./sounds/HDC1200.mp3')
+    radioSound.volume = 0.7
+    
     // Función para reproducir sonido de radio
-    async function playRadioSound(soundName) {
+    async function playRadioSound() {
         try {
-            const sound = radioSounds[soundName]
-            if (sound) {
-                await sound.play()
-            }
+            radioSound.currentTime = 0
+            await radioSound.play()
         } catch (error) {
             console.error('Error al reproducir sonido:', error)
         }
     }
+
+    // Asegurarnos de que el sonido esté cargado
+    radioSound.addEventListener('error', (e) => {
+        console.error('Error cargando el sonido:', e.target.error)
+    })
+
+    radioSound.addEventListener('loadeddata', () => {
+        console.log('Sonido cargado correctamente')
+        // Reproducir un sonido corto para verificar que funciona
+        playRadioSound()
+    })
 
     // Función para actualizar el estado en la UI
     function updateStatus(message) {
@@ -95,7 +95,6 @@ document.addEventListener('DOMContentLoaded', () => {
             currentConnection = conn
             updateStatus(`Conectado a: ${targetPeerId}`)
             updateRecordButton(true)
-            playRadioSound('connect')
         })
 
         conn.on('data', async (data) => {
@@ -106,7 +105,6 @@ document.addEventListener('DOMContentLoaded', () => {
             currentConnection = null
             updateStatus('Desconectado')
             updateRecordButton(false)
-            playRadioSound('disconnect')
         })
 
         conn.on('error', (err) => {
@@ -114,7 +112,6 @@ document.addEventListener('DOMContentLoaded', () => {
             currentConnection = null
             updateStatus('Error en la conexión')
             updateRecordButton(false)
-            playRadioSound('disconnect')
         })
     }
 
@@ -146,7 +143,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 currentConnection = conn
                 updateStatus('Conexión establecida')
                 updateRecordButton(true)
-                playRadioSound('connect')
                 
                 conn.on('data', async (data) => {
                     await playAudioChunk(data)
@@ -156,7 +152,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     currentConnection = null
                     updateStatus('Desconectado')
                     updateRecordButton(false)
-                    playRadioSound('disconnect')
                 })
             })
 
@@ -164,7 +159,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error('Error en PeerJS:', err)
                 updateStatus('Error en la conexión')
                 updateRecordButton(false)
-                playRadioSound('disconnect')
             })
 
         } catch (error) {
@@ -179,7 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             if (isRecording || !currentConnection) return;
             
-            await playRadioSound('start')
+            await playRadioSound() // Sonido al iniciar grabación
             
             audioStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
@@ -249,7 +243,7 @@ document.addEventListener('DOMContentLoaded', () => {
             isRecording = false
             updateStatus('Conectado')
             recordBtn.classList.remove('recording')
-            await playRadioSound('end')
+            await playRadioSound() // Sonido al soltar el botón
         } catch (error) {
             console.error('Error al detener la grabación:', error)
         }
