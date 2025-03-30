@@ -11,7 +11,7 @@ class AudioProcessor extends AudioWorkletProcessor {
         this.processInterval = 1000 / (this.bitRate / this.bufferSize) // Intervalo basado en bitRate
     }
 
-    process(inputs, outputs, parameters) {
+    process(inputs) {
         const input = inputs[0]
         if (!input || !input[0]) return true
 
